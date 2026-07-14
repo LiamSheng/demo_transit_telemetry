@@ -9,6 +9,9 @@ resources:
       serverless: true
       continuous: false
 
+      configuration:
+        transit.source_path: /Volumes/${var.catalog}/${var.schema}/transit_landing/raw/bus_telemetry
+
       libraries:
         - file:
             path: ../src/bus_telemetry_pipeline.py

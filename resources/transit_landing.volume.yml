@@ -1,0 +1,8 @@
+resources:
+  volumes:
+    transit_landing:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: transit_landing
+      volume_type: MANAGED
+      comment: Landing volume for raw transit telemetry source files.

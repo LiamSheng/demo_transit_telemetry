@@ -9,3 +9,6 @@ scratch/**
 **/explorations/**
 **/!explorations/README.md
 .vscode
+
+# Runtime source files
+fixtures/source/*.csv
