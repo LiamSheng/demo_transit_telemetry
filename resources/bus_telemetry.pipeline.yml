@@ -1,0 +1,14 @@
+resources:
+  pipelines:
+    bus_telemetry_pipeline:
+      name: bus_telemetry_pipeline
+
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+
+      serverless: true
+      continuous: false
+
+      libraries:
+        - file:
+            path: ../src/bus_telemetry_pipeline.py
