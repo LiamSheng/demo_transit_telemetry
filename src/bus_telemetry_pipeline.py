@@ -7,13 +7,35 @@ from pyspark.sql.types import (
     StructField,
     StructType,
 )
+from pyspark.sql.window import Window
 
 
 SOURCE_PATH = spark.conf.get("transit.source_path")
 
+LOW_BATTERY_THRESHOLD = float(
+    spark.conf.get(
+        "transit.rules.low_battery_pct",
+        "10",
+    )
+)
+
+INGEST_DELAY_THRESHOLD_SECONDS = float(
+    spark.conf.get(
+        "transit.rules.ingest_delay_seconds",
+        "30",
+    )
+)
+
+TELEMETRY_GAP_THRESHOLD_SECONDS = float(
+    spark.conf.get(
+        "transit.rules.telemetry_gap_seconds",
+        "300",
+    )
+)
+
 
 # ---------------------------------------------------------------------------
-# Bronze contract
+# Bronze contracts
 # ---------------------------------------------------------------------------
 
 RAW_TELEMETRY_SCHEMA = StructType(
@@ -80,8 +102,8 @@ PAYLOAD_SCHEMA = StructType(
 )
 
 
-# Expectations currently use WARN semantics:
-# invalid rows remain in Silver, while the Pipeline records quality metrics.
+# Expectations currently use WARN semantics.
+# Invalid rows remain observable while the pipeline records quality metrics.
 SILVER_EXPECTATIONS = {
     "event_id_present": "event_id IS NOT NULL",
     "device_id_present": "device_id IS NOT NULL",
@@ -91,7 +113,10 @@ SILVER_EXPECTATIONS = {
     "humidity_valid": "humidity_pct BETWEEN 0 AND 100",
     "pressure_numeric": "pressure_hpa IS NOT NULL",
     "battery_valid": "battery_pct BETWEEN 0 AND 100",
-    "coordinates_valid": ("latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180"),
+    "coordinates_valid": (
+        "latitude BETWEEN -90 AND 90 "
+        "AND longitude BETWEEN -180 AND 180"
+    ),
     "ingest_delay_non_negative": "ingest_delay_seconds >= 0",
     "iot_hub_device_consistent": "device_id = iot_hub_device_id",
     "payload_consistent": "payload_matches_columns = true",
@@ -101,7 +126,6 @@ SILVER_EXPECTATIONS = {
 # ---------------------------------------------------------------------------
 # Bronze
 # ---------------------------------------------------------------------------
-
 
 @dp.table(
     name="bronze_bus_telemetry",
@@ -114,8 +138,11 @@ SILVER_EXPECTATIONS = {
     },
 )
 def bronze_bus_telemetry():
+    """Incrementally ingest raw CSV telemetry with Auto Loader."""
+
     raw_stream = (
-        spark.readStream.format("cloudFiles")
+        spark.readStream
+        .format("cloudFiles")
         .option("cloudFiles.format", "csv")
         .option("header", "true")
         .option("mode", "PERMISSIVE")
@@ -131,9 +158,15 @@ def bronze_bus_telemetry():
 
     return raw_stream.select(
         "*",
-        F.col("_metadata.file_name").alias("_source_file_name"),
-        F.col("_metadata.file_path").alias("_source_file_path"),
-        F.col("_metadata.file_modification_time").alias("_source_file_modified_at"),
+        F.col("_metadata.file_name").alias(
+            "_source_file_name"
+        ),
+        F.col("_metadata.file_path").alias(
+            "_source_file_path"
+        ),
+        F.col("_metadata.file_modification_time").alias(
+            "_source_file_modified_at"
+        ),
         F.current_timestamp().alias("_ingested_at"),
     )
 
@@ -141,7 +174,6 @@ def bronze_bus_telemetry():
 # ---------------------------------------------------------------------------
 # Silver
 # ---------------------------------------------------------------------------
-
 
 @dp.table(
     name="silver_bus_sensor_readings",
@@ -155,10 +187,15 @@ def bronze_bus_telemetry():
 )
 @dp.expect_all(SILVER_EXPECTATIONS)
 def silver_bus_sensor_readings():
-    bronze_stream = spark.readStream.table("bronze_bus_telemetry")
+    """Parse, validate, enrich, and deduplicate Bronze telemetry."""
+
+    bronze_stream = spark.readStream.table(
+        "bronze_bus_telemetry"
+    )
 
     parsed = (
-        bronze_stream.withColumn(
+        bronze_stream
+        .withColumn(
             "_properties_json",
             F.from_json(
                 F.col("properties"),
@@ -185,46 +222,143 @@ def silver_bus_sensor_readings():
         F.col("eventId").alias("event_id"),
         F.col("deviceId").alias("device_id"),
         F.col("streamId").alias("stream_id"),
-        F.try_to_timestamp(F.col("eventTime")).alias("event_time_utc"),
-        F.try_to_timestamp(F.col("timestamp")).alias("sensor_time_utc"),
-        F.try_to_timestamp(F.col("_system_properties_json")["iothub-enqueuedtime"]).alias("iot_hub_enqueued_time_utc"),
-        F.expr("try_cast(temperature AS DOUBLE)").alias("temperature_c"),
-        F.expr("try_cast(humidity AS DOUBLE)").alias("humidity_pct"),
-        F.expr("try_cast(pressure AS DOUBLE)").alias("pressure_hpa"),
-        F.expr("try_cast(battery AS DOUBLE)").alias("battery_pct"),
-        F.expr("try_cast(longitude AS DOUBLE)").alias("longitude"),
-        F.expr("try_cast(latitude AS DOUBLE)").alias("latitude"),
-        F.col("_properties_json.deviceType").alias("device_type"),
-        F.col("_properties_json.location").alias("city"),
-        F.col("_system_properties_json")["iothub-connection-device-id"].alias("iot_hub_device_id"),
-        F.col("_system_properties_json")["iothub-message-source"].alias("message_source"),
-        F.col("_system_properties_json")["iothub-content-type"].alias("content_type"),
-        F.col("_system_properties_json")["iothub-content-encoding"].alias("content_encoding"),
-        # Temporary fields used to verify that the flattened CSV
-        # columns still agree with the original nested payload.
-        F.try_to_timestamp(F.col("_payload_json.body.timestamp")).alias("_payload_sensor_time_utc"),
-        F.col("_payload_json.body.temperature").alias("_payload_temperature_c"),
-        F.col("_payload_json.body.humidity").alias("_payload_humidity_pct"),
-        F.col("_payload_json.body.pressure").alias("_payload_pressure_hpa"),
-        F.col("_payload_json.body.battery").alias("_payload_battery_pct"),
-        F.col("_payload_json.body.longitude").alias("_payload_longitude"),
-        F.col("_payload_json.body.latitude").alias("_payload_latitude"),
-        F.col("_payload_json.properties.streamId").alias("_payload_stream_id"),
-        F.col("_payload_json.properties.deviceType").alias("_payload_device_type"),
-        F.col("_payload_json.properties.location").alias("_payload_city"),
-        F.col("_payload_json.systemProperties")["iothub-connection-device-id"].alias("_payload_device_id"),
-        F.col("_payload_json.systemProperties")["iothub-message-source"].alias("_payload_message_source"),
-        F.col("_source_file_name").alias("source_file_name"),
-        F.col("_source_file_path").alias("source_file_path"),
-        F.col("_source_file_modified_at").alias("source_file_modified_at"),
-        F.col("_ingested_at").alias("bronze_ingested_at"),
+
+        F.try_to_timestamp(
+            F.col("eventTime")
+        ).alias("event_time_utc"),
+
+        F.try_to_timestamp(
+            F.col("timestamp")
+        ).alias("sensor_time_utc"),
+
+        F.try_to_timestamp(
+            F.col("_system_properties_json")[
+                "iothub-enqueuedtime"
+            ]
+        ).alias("iot_hub_enqueued_time_utc"),
+
+        F.expr(
+            "try_cast(temperature AS DOUBLE)"
+        ).alias("temperature_c"),
+
+        F.expr(
+            "try_cast(humidity AS DOUBLE)"
+        ).alias("humidity_pct"),
+
+        F.expr(
+            "try_cast(pressure AS DOUBLE)"
+        ).alias("pressure_hpa"),
+
+        F.expr(
+            "try_cast(battery AS DOUBLE)"
+        ).alias("battery_pct"),
+
+        F.expr(
+            "try_cast(longitude AS DOUBLE)"
+        ).alias("longitude"),
+
+        F.expr(
+            "try_cast(latitude AS DOUBLE)"
+        ).alias("latitude"),
+
+        F.col(
+            "_properties_json.deviceType"
+        ).alias("device_type"),
+
+        F.col(
+            "_properties_json.location"
+        ).alias("city"),
+
+        F.col("_system_properties_json")[
+            "iothub-connection-device-id"
+        ].alias("iot_hub_device_id"),
+
+        F.col("_system_properties_json")[
+            "iothub-message-source"
+        ].alias("message_source"),
+
+        F.col("_system_properties_json")[
+            "iothub-content-type"
+        ].alias("content_type"),
+
+        F.col("_system_properties_json")[
+            "iothub-content-encoding"
+        ].alias("content_encoding"),
+
+        # Temporary payload fields used to confirm that the flattened CSV
+        # columns still agree with the original nested message.
+        F.try_to_timestamp(
+            F.col("_payload_json.body.timestamp")
+        ).alias("_payload_sensor_time_utc"),
+
+        F.col(
+            "_payload_json.body.temperature"
+        ).alias("_payload_temperature_c"),
+
+        F.col(
+            "_payload_json.body.humidity"
+        ).alias("_payload_humidity_pct"),
+
+        F.col(
+            "_payload_json.body.pressure"
+        ).alias("_payload_pressure_hpa"),
+
+        F.col(
+            "_payload_json.body.battery"
+        ).alias("_payload_battery_pct"),
+
+        F.col(
+            "_payload_json.body.longitude"
+        ).alias("_payload_longitude"),
+
+        F.col(
+            "_payload_json.body.latitude"
+        ).alias("_payload_latitude"),
+
+        F.col(
+            "_payload_json.properties.streamId"
+        ).alias("_payload_stream_id"),
+
+        F.col(
+            "_payload_json.properties.deviceType"
+        ).alias("_payload_device_type"),
+
+        F.col(
+            "_payload_json.properties.location"
+        ).alias("_payload_city"),
+
+        F.col("_payload_json.systemProperties")[
+            "iothub-connection-device-id"
+        ].alias("_payload_device_id"),
+
+        F.col("_payload_json.systemProperties")[
+            "iothub-message-source"
+        ].alias("_payload_message_source"),
+
+        F.col("_source_file_name").alias(
+            "source_file_name"
+        ),
+
+        F.col("_source_file_path").alias(
+            "source_file_path"
+        ),
+
+        F.col("_source_file_modified_at").alias(
+            "source_file_modified_at"
+        ),
+
+        F.col("_ingested_at").alias(
+            "bronze_ingested_at"
+        ),
     )
 
     enriched = (
-        typed.withColumn(
+        typed
+        .withColumn(
             "ingest_delay_seconds",
             F.round(
-                F.col("event_time_utc").cast("double") - F.col("sensor_time_utc").cast("double"),
+                F.col("event_time_utc").cast("double")
+                - F.col("sensor_time_utc").cast("double"),
                 6,
             ),
         )
@@ -232,18 +366,54 @@ def silver_bus_sensor_readings():
             "payload_matches_columns",
             F.coalesce(
                 (
-                    (F.col("sensor_time_utc") == F.col("_payload_sensor_time_utc"))
-                    & (F.col("temperature_c") == F.col("_payload_temperature_c"))
-                    & (F.col("humidity_pct") == F.col("_payload_humidity_pct"))
-                    & (F.col("pressure_hpa") == F.col("_payload_pressure_hpa"))
-                    & (F.col("battery_pct") == F.col("_payload_battery_pct"))
-                    & (F.col("longitude") == F.col("_payload_longitude"))
-                    & (F.col("latitude") == F.col("_payload_latitude"))
-                    & (F.col("stream_id") == F.col("_payload_stream_id"))
-                    & (F.col("device_type") == F.col("_payload_device_type"))
-                    & (F.col("city") == F.col("_payload_city"))
-                    & (F.col("device_id") == F.col("_payload_device_id"))
-                    & (F.col("message_source") == F.col("_payload_message_source"))
+                    (
+                        F.col("sensor_time_utc")
+                        == F.col("_payload_sensor_time_utc")
+                    )
+                    & (
+                        F.col("temperature_c")
+                        == F.col("_payload_temperature_c")
+                    )
+                    & (
+                        F.col("humidity_pct")
+                        == F.col("_payload_humidity_pct")
+                    )
+                    & (
+                        F.col("pressure_hpa")
+                        == F.col("_payload_pressure_hpa")
+                    )
+                    & (
+                        F.col("battery_pct")
+                        == F.col("_payload_battery_pct")
+                    )
+                    & (
+                        F.col("longitude")
+                        == F.col("_payload_longitude")
+                    )
+                    & (
+                        F.col("latitude")
+                        == F.col("_payload_latitude")
+                    )
+                    & (
+                        F.col("stream_id")
+                        == F.col("_payload_stream_id")
+                    )
+                    & (
+                        F.col("device_type")
+                        == F.col("_payload_device_type")
+                    )
+                    & (
+                        F.col("city")
+                        == F.col("_payload_city")
+                    )
+                    & (
+                        F.col("device_id")
+                        == F.col("_payload_device_id")
+                    )
+                    & (
+                        F.col("message_source")
+                        == F.col("_payload_message_source")
+                    )
                 ),
                 F.lit(False),
             ),
@@ -266,8 +436,222 @@ def silver_bus_sensor_readings():
 
     return (
         enriched
-        # Provisional threshold for this prototype. The sample files
-        # span approximately six days, so 30 days safely covers the
-        # initial snapshot and deliberately late duplicate tests.
-        .withWatermark("sensor_time_utc", "30 days").dropDuplicatesWithinWatermark(["event_id"])
+        # Prototype retention window. It is deliberately longer than the
+        # six-day span of the supplied sample data.
+        .withWatermark("sensor_time_utc", "30 days")
+        .dropDuplicatesWithinWatermark(["event_id"])
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gold readings
+# ---------------------------------------------------------------------------
+
+@dp.materialized_view(
+    name="gold_bus_sensor_readings",
+    comment=(
+        "Business-ready bus sensor readings for operational reporting, "
+        "trend analysis, mapping, and downstream analytics."
+    ),
+    table_properties={
+        "quality": "gold",
+    },
+)
+def gold_bus_sensor_readings():
+    """Publish the stable business-facing telemetry contract."""
+
+    return (
+        spark.read.table("silver_bus_sensor_readings")
+        .select(
+            "event_id",
+            "device_id",
+            "stream_id",
+            "event_time_utc",
+            "sensor_time_utc",
+            "iot_hub_enqueued_time_utc",
+            "temperature_c",
+            "humidity_pct",
+            "pressure_hpa",
+            "battery_pct",
+            "longitude",
+            "latitude",
+            "device_type",
+            "city",
+            "ingest_delay_seconds",
+            "message_source",
+            "source_file_name",
+        )
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gold anomaly helpers
+# ---------------------------------------------------------------------------
+
+def _project_anomaly(
+    dataframe,
+    *,
+    anomaly_type: str,
+    metric_name: str,
+    metric_value,
+    threshold_value: float,
+    previous_sensor_time=None,
+):
+    """Convert matching readings into the common anomaly-event schema."""
+
+    previous_time = (
+        previous_sensor_time
+        if previous_sensor_time is not None
+        else F.lit(None).cast("timestamp")
+    )
+
+    return dataframe.select(
+        F.sha2(
+            F.concat_ws(
+                "||",
+                F.lit("v1"),
+                F.lit(anomaly_type),
+                F.col("event_id"),
+            ),
+            256,
+        ).alias("anomaly_id"),
+
+        F.col("event_id"),
+        F.col("device_id"),
+        F.col("stream_id"),
+
+        F.lit(anomaly_type).alias("anomaly_type"),
+        F.lit("WARNING").alias("severity"),
+        F.lit("v1").alias("rule_version"),
+
+        # The event that reveals the anomaly has reached the platform.
+        F.col("event_time_utc").alias(
+            "anomaly_observed_at_utc"
+        ),
+
+        F.col("event_time_utc"),
+        F.col("sensor_time_utc"),
+        previous_time.alias("previous_sensor_time_utc"),
+
+        F.lit(metric_name).alias("metric_name"),
+        metric_value.cast("double").alias("metric_value"),
+
+        F.lit(threshold_value)
+        .cast("double")
+        .alias("threshold_value"),
+
+        F.col("device_type"),
+        F.col("city"),
+        F.col("latitude"),
+        F.col("longitude"),
+
+        F.col("source_file_name"),
+        F.col("source_file_path"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gold anomalies
+# ---------------------------------------------------------------------------
+
+@dp.materialized_view(
+    name="gold_bus_sensor_anomalies",
+    comment=(
+        "Business-ready anomaly events generated from curated bus "
+        "telemetry. A source event can produce multiple anomaly rows."
+    ),
+    table_properties={
+        "quality": "gold",
+    },
+)
+def gold_bus_sensor_anomalies():
+    """Detect low battery, ingestion delay, and historical telemetry gaps."""
+
+    readings = spark.read.table(
+        "silver_bus_sensor_readings"
+    )
+
+    # event_time_utc and event_id provide deterministic tie-breakers when
+    # two readings have the same sensor timestamp.
+    device_timeline = (
+        Window
+        .partitionBy(
+            "device_id",
+            "stream_id",
+        )
+        .orderBy(
+            F.col("sensor_time_utc"),
+            F.col("event_time_utc"),
+            F.col("event_id"),
+        )
+    )
+
+    readings_with_gap = (
+        readings
+        .withColumn(
+            "_previous_sensor_time_utc",
+            F.lag("sensor_time_utc").over(
+                device_timeline
+            ),
+        )
+        .withColumn(
+            "_telemetry_gap_seconds",
+            (
+                F.col("sensor_time_utc").cast("double")
+                - F.col(
+                    "_previous_sensor_time_utc"
+                ).cast("double")
+            ),
+        )
+    )
+
+    low_battery = _project_anomaly(
+        readings.filter(
+            F.col("battery_pct").isNotNull()
+            & (
+                F.col("battery_pct")
+                <= LOW_BATTERY_THRESHOLD
+            )
+        ),
+        anomaly_type="LOW_BATTERY",
+        metric_name="battery_pct",
+        metric_value=F.col("battery_pct"),
+        threshold_value=LOW_BATTERY_THRESHOLD,
+    )
+
+    ingest_delay = _project_anomaly(
+        readings.filter(
+            F.col("ingest_delay_seconds").isNotNull()
+            & (
+                F.col("ingest_delay_seconds")
+                > INGEST_DELAY_THRESHOLD_SECONDS
+            )
+        ),
+        anomaly_type="INGEST_DELAY",
+        metric_name="ingest_delay_seconds",
+        metric_value=F.col("ingest_delay_seconds"),
+        threshold_value=INGEST_DELAY_THRESHOLD_SECONDS,
+    )
+
+    telemetry_gap = _project_anomaly(
+        readings_with_gap.filter(
+            F.col("_previous_sensor_time_utc").isNotNull()
+            & (
+                F.col("_telemetry_gap_seconds")
+                > TELEMETRY_GAP_THRESHOLD_SECONDS
+            )
+        ),
+        anomaly_type="TELEMETRY_GAP",
+        metric_name="telemetry_gap_seconds",
+        metric_value=F.col("_telemetry_gap_seconds"),
+        threshold_value=TELEMETRY_GAP_THRESHOLD_SECONDS,
+        previous_sensor_time=F.col(
+            "_previous_sensor_time_utc"
+        ),
+    )
+
+    return (
+        low_battery
+        .unionByName(ingest_delay)
+        .unionByName(telemetry_gap)
     )

@@ -12,6 +12,9 @@ resources:
       configuration:
         transit.source_path: /Volumes/${var.catalog}/${var.schema}/transit_landing/raw/bus_telemetry
         spark.sql.session.timeZone: UTC
+        transit.rules.low_battery_pct: "10"
+        transit.rules.ingest_delay_seconds: "30"
+        transit.rules.telemetry_gap_seconds: "300"
 
       libraries:
         - file:
