@@ -11,6 +11,7 @@ resources:
 
       configuration:
         transit.source_path: /Volumes/${var.catalog}/${var.schema}/transit_landing/raw/bus_telemetry
+        spark.sql.session.timeZone: UTC
 
       libraries:
         - file:
