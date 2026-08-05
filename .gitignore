@@ -12,3 +12,4 @@ scratch/**
 
 # Runtime source files
 fixtures/source/*.csv
+work/**

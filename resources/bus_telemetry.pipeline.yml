@@ -10,7 +10,7 @@ resources:
       continuous: false
 
       configuration:
-        transit.source_path: /Volumes/${var.catalog}/${var.schema}/transit_landing/raw/bus_telemetry
+        transit.sources.bus_telemetry.path: /Volumes/${var.catalog}/${var.schema}/transit_landing/raw/bus_telemetry
         spark.sql.session.timeZone: UTC
         transit.rules.low_battery_pct: "10"
         transit.rules.ingest_delay_seconds: "30"
@@ -18,4 +18,13 @@ resources:
 
       libraries:
         - file:
-            path: ../src/bus_telemetry_pipeline.py
+            path: ../src/pipelines/bronze/bus_telemetry.py
+
+        - file:
+            path: ../src/pipelines/silver/bus_telemetry.py
+
+        - file:
+            path: ../src/pipelines/gold/bus_sensor_readings.py
+
+        - file:
+            path: ../src/pipelines/gold/bus_sensor_anomalies.py
