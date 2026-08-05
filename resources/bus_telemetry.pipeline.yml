@@ -1,7 +1,7 @@
 resources:
   pipelines:
     bus_telemetry_pipeline:
-      name: bus_telemetry_pipeline
+      name: bc_transit_bus_telemetry_pipeline
 
       catalog: ${var.catalog}
       schema: ${var.schema}

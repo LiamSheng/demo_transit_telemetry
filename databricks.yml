@@ -21,7 +21,6 @@ targets:
     # - Any job schedules and triggers are paused by default.
     # See also https://docs.databricks.com/dev-tools/bundles/deployment-modes.html.
     mode: development
-    default: true
     workspace:
       host: https://8259556718515952.2.gcp.databricks.com
     variables:
@@ -35,3 +34,11 @@ targets:
     variables:
       catalog: workspace
       schema: prod
+  transit_dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://8259556718515952.2.gcp.databricks.com
+    variables:
+      catalog: bc_transit
+      schema: dev
