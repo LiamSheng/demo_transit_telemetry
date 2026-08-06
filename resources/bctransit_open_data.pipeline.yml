@@ -1,0 +1,21 @@
+resources:
+  pipelines:
+    bctransit_open_data_pipeline:
+      name: bc_transit_open_data_pipeline
+
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+
+      serverless: true
+      continuous: false
+
+      configuration:
+        transit.sources.rt_service_alerts.path: /Volumes/${var.catalog}/${var.schema}/transit_landing/raw/rt_service_alerts
+        transit.gtfs_rt.descriptor_path: /Volumes/${var.catalog}/${var.schema}/transit_landing/schema/gtfs-realtime.desc
+        spark.sql.session.timeZone: UTC
+
+      libraries:
+        - file:
+            path: ../src/pipelines/bronze/rt_service_alerts.py
+        - file:
+            path: ../src/pipelines/silver/rt_service_alerts.py

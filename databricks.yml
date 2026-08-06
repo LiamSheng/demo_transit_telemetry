@@ -13,6 +13,9 @@ variables:
     description: The catalog to use
   schema:
     description: The schema to use
+  rt_service_alerts_url:
+    description: BC Transit Victoria GTFS-RT alerts endpoint
+    default: "https://bct.tmix.se/gtfs-realtime/alerts.pb?operatorIds=48"
 
 targets:
   dev:
