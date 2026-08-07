@@ -11,28 +11,7 @@ resources:
         pause_status: PAUSED
 
       tasks:
-        - task_key: land_rt_service_alerts
-          environment_key: default
-
-          spark_python_task:
-            python_file: ../src/jobs/land_gtfs_rt_service_alerts.py
-            parameters:
-              - --source-url
-              - ${var.rt_service_alerts_url}
-              - --landing-path
-              - /Volumes/${var.catalog}/${var.schema}/transit_landing/raw/rt_service_alerts
-              - --manifest-path
-              - /Volumes/${var.catalog}/${var.schema}/transit_landing/manifest/rt_service_alerts
-
         - task_key: update_open_data_pipeline
-          depends_on:
-            - task_key: land_rt_service_alerts
-
           pipeline_task:
             pipeline_id: ${resources.pipelines.bctransit_open_data_pipeline.id}
             full_refresh: false
-
-      environments:
-        - environment_key: default
-          spec:
-            environment_version: "2"
