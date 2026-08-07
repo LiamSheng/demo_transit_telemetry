@@ -3,8 +3,11 @@ resources:
     bctransit_landing_job:
       name: bc_transit_landing_job
 
+      # 此仓库只负责消费已经落入 UC Volume 的文件。
+      # BC Transit 拉取与文件发布由独立 poller 仓库负责。
       max_concurrent_runs: 1
 
+      # 定期触发增量 Pipeline；它不会主动调用外部 poller。
       schedule:
         quartz_cron_expression: "0 0/15 * * * ?"
         timezone_id: America/Vancouver
