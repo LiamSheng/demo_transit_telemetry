@@ -176,6 +176,28 @@ The two observed SHA-addressed snapshots also had different alert entity
 counts. They were therefore different feed snapshots, not merely the same
 logical payload with a changed header timestamp.
 
+### Current manifest persistence boundary
+
+The current poller writes one local JSON manifest for every successful or
+failed attempt. GitHub Actions uploads those local files only as the
+`bc-transit-polling-manifest` artifact with seven-day retention. The current
+poller code does not publish attempt manifests to the Unity Catalog Volume.
+
+Two JSON files currently exist under the older singular path:
+
+```text
+/Volumes/bc_transit/dev/transit_landing/manifest/rt_service_alerts
+```
+
+Both files were created on 2026-08-06, use an earlier manifest schema, and
+record `URL_ERROR` failures caused by temporary DNS resolution errors. They are
+not evidence that the current GitHub workflow continuously publishes manifests
+to the Volume.
+
+Future durable manifest ingestion should use a dedicated immutable landing
+contract, separate from the Protobuf payload directory, and should retain the
+GitHub artifact as an external fallback when Databricks itself is unavailable.
+
 ## Controlled scheduling and backlog test plan
 
 Scheduling will be enabled in stages so producer catch-up and consumer
@@ -183,23 +205,42 @@ idempotency can be observed independently.
 
 ### Stage 1: schedule only the poller
 
-Keep `workflow_dispatch` and add a 15-minute schedule plus overlap protection:
+Keep `workflow_dispatch` and use a nominal 45-minute schedule plus overlap
+protection:
 
 ```yaml
 on:
   workflow_dispatch:
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "7 0-23/3 * * *"
+    - cron: "52 0-23/3 * * *"
+    - cron: "37 1-23/3 * * *"
+    - cron: "22 2-23/3 * * *"
 
 concurrency:
   group: bc-transit-service-alerts-poller-dev
   cancel-in-progress: false
 ```
 
-The off-quarter-hour schedule avoids the top of the hour and nominally gives
-the poller about eight minutes before the next Databricks quarter-hour run.
-This offset is not a dependency: GitHub scheduled runs can be delayed, and the
-consumer must recover on a later run through its checkpoint.
+POSIX cron cannot express a true repeating 45-minute interval with `*/45`:
+that expression runs at minutes 00 and 45 of every hour, producing alternating
+45- and 15-minute gaps. The four expressions above produce this UTC sequence:
+
+```text
+00:07 -> 00:52 -> 01:37 -> 02:22 -> 03:07
+```
+
+The schedule avoids the top of the hour and nominally gives the poller about
+eight minutes before the next Databricks quarter-hour run. This offset is not a
+dependency: GitHub scheduled runs can be delayed, and the consumer must recover
+on a later run through its checkpoint.
+
+A 45-minute poll cadence can measure the refresh intervals that the poller
+observes, but it cannot prove the source's complete generation frequency. The
+endpoint returns only the current snapshot. If BC Transit generates multiple
+snapshots between two polls, intermediate header timestamps and business states
+are not recoverable from the later response. Any reported metric must therefore
+be labeled as an observed refresh interval under 45-minute sampling.
 
 The job continues to use the GitHub `dev` Environment, so scheduled and manual
 runs share the same OIDC federation subject and Databricks service-principal
@@ -215,10 +256,11 @@ timezone_id: America/Vancouver
 pause_status: PAUSED
 ```
 
-Allow three to five automatic poller attempts. `ALREADY_EXISTS` is expected
-when the endpoint returns identical bytes; `UPLOADED` means a new immutable
-snapshot was added. Ideally, two or more new SHA paths accumulate before the
-catch-up run.
+Allow three to five automatic poller attempts, which requires approximately
+two hours and fifteen minutes to three hours and forty-five minutes.
+`ALREADY_EXISTS` is expected when the endpoint returns identical bytes;
+`UPLOADED` means a new immutable snapshot was added. Ideally, two or more new
+SHA paths accumulate before the catch-up run.
 
 ### Stage 3: run one manual backlog catch-up
 
@@ -257,7 +299,7 @@ databricks bundle deploy --target transit_dev
 The intended nominal cadence is:
 
 ```text
-GitHub poller:       minute 07, 22, 37, 52
+GitHub poller:       nominally every 45 minutes
 Databricks consumer: minute 00, 15, 30, 45
 ```
 
