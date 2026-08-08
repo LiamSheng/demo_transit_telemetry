@@ -130,102 +130,160 @@ Auto Loader tracks physical paths. The content hash additionally identifies
 same-content files, but downstream event/entity semantics remain a separate
 data-modeling concern.
 
-## Next end-to-end smoke test
+## Verified end-to-end behavior
 
-The next test validates the consumer half of the contract:
+The following development smoke tests have now passed.
 
-```text
-new Volume file
-  -> Auto Loader discovers exactly one new physical file
-  -> Bronze gains one row
-  -> Protobuf decode succeeds
-  -> zero new quarantine rows
-  -> zero or more Silver alert entities are emitted
+### Invalid-file routing and the zero-byte blind spot
+
+- A non-empty invalid Protobuf file, `invalid_not_null_pb.pb`, produced a Bronze
+  row and was routed to the quarantine table.
+- A zero-byte file, `invalid_pb.pb`, did not produce a `binaryFile` input row.
+  It was therefore invisible to Bronze and quarantine.
+- The `EMPTY_FILE` branch in the Silver parser cannot catch a file that the
+  source reader never emits. This is an ingestion-inventory gap, not a
+  successful quarantine outcome.
+- The normal poller rejects an empty HTTP response before publishing it, but a
+  separate Volume inventory and reconciliation process is still required to
+  detect zero-byte files created by other writers or manual operations.
+
+### Consumer checkpoint idempotency
+
+The same unchanged Volume contents were processed twice without a full refresh.
+On the second run:
+
+- Bronze row and distinct-file counts were unchanged.
+- Silver row and distinct-file counts were unchanged.
+- Quarantine counts were unchanged.
+- The latest `bronze_ingested_at` value was unchanged.
+
+This demonstrates physical-path idempotency through the Auto Loader checkpoint.
+
+### New immutable file incremental ingestion
+
+A later poller attempt returned a byte-distinct Service Alerts snapshot and
+published a new full-SHA path with `volume_publish_status=UPLOADED`. Before the
+consumer ran, the new SHA path was absent from Bronze. After one incremental
+consumer run:
+
+- Bronze increased by exactly one physical-file row.
+- The Bronze path matched the SHA-addressed file published by the poller.
+- Existing physical paths were not emitted again.
+- The valid payload decoded into its Service Alert entities in Silver.
+- Quarantine did not increase for the new file.
+
+The two observed SHA-addressed snapshots also had different alert entity
+counts. They were therefore different feed snapshots, not merely the same
+logical payload with a changed header timestamp.
+
+## Controlled scheduling and backlog test plan
+
+Scheduling will be enabled in stages so producer catch-up and consumer
+idempotency can be observed independently.
+
+### Stage 1: schedule only the poller
+
+Keep `workflow_dispatch` and add a 15-minute schedule plus overlap protection:
+
+```yaml
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+
+concurrency:
+  group: bc-transit-service-alerts-poller-dev
+  cancel-in-progress: false
 ```
 
-Silver can legitimately gain zero rows if a valid GTFS-RT snapshot contains no
-alert entities. Therefore the primary success conditions are Bronze ingestion,
-successful decode, and no new quarantine row; Silver entity count is a
-source-content observation, not an unconditional pass criterion.
+The off-quarter-hour schedule avoids the top of the hour and nominally gives
+the poller about eight minutes before the next Databricks quarter-hour run.
+This offset is not a dependency: GitHub scheduled runs can be delayed, and the
+consumer must recover on a later run through its checkpoint.
 
-### Before the run
+The job continues to use the GitHub `dev` Environment, so scheduled and manual
+runs share the same OIDC federation subject and Databricks service-principal
+identity.
 
-Record baseline counts and the latest Bronze path:
+### Stage 2: keep the consumer paused and accumulate a backlog
 
-```sql
-SELECT count(*) AS bronze_before
-FROM bc_transit.dev.bronze_gtfs_rt_service_alert_files;
+The Databricks job remains configured as:
 
-SELECT count(*) AS silver_before
-FROM bc_transit.dev.silver_gtfs_rt_service_alerts;
-
-SELECT count(*) AS quarantine_before
-FROM bc_transit.dev.quarantine_gtfs_rt_service_alert_files;
-
-SELECT source_file_path, source_file_size_bytes, bronze_ingested_at
-FROM bc_transit.dev.bronze_gtfs_rt_service_alert_files
-ORDER BY bronze_ingested_at DESC
-LIMIT 5;
+```yaml
+quartz_cron_expression: "0 0/15 * * * ?"
+timezone_id: America/Vancouver
+pause_status: PAUSED
 ```
 
-### Run
+Allow three to five automatic poller attempts. `ALREADY_EXISTS` is expected
+when the endpoint returns identical bytes; `UPLOADED` means a new immutable
+snapshot was added. Ideally, two or more new SHA paths accumulate before the
+catch-up run.
 
-Deploy and run the `transit_dev` target without a full refresh:
+### Stage 3: run one manual backlog catch-up
+
+Run the consumer once without a full refresh:
 
 ```bash
-databricks bundle validate --target transit_dev
-databricks bundle deploy --target transit_dev
 databricks bundle run bctransit_landing_job --target transit_dev
 ```
 
-### After the run
+Acceptance criteria:
 
-Re-run the baseline queries and inspect the new file:
+- One pipeline update discovers every newly accumulated path.
+- Bronze gains exactly one row for each new physical file.
+- No existing Bronze path gains a duplicate row.
+- Valid alert entities are emitted to Silver.
+- Invalid non-empty files are routed to quarantine.
+- A second unchanged consumer run produces no additional rows.
 
-```sql
-SELECT
-  source_file_path,
-  source_file_size_bytes,
-  source_file_modified_at,
-  bronze_ingested_at
-FROM bc_transit.dev.bronze_gtfs_rt_service_alert_files
-ORDER BY bronze_ingested_at DESC;
+This proves that producer and consumer schedules are independent and that the
+consumer can catch up after a delay or outage.
 
-SELECT
-  source_file_path,
-  feed_timestamp_unix,
-  feed_entity_id,
-  cause,
-  effect
-FROM bc_transit.dev.silver_gtfs_rt_service_alerts
-ORDER BY bronze_ingested_at DESC;
+### Stage 4: unpause the consumer
 
-SELECT
-  source_file_path,
-  source_file_size_bytes,
-  parse_status,
-  quarantined_at
-FROM bc_transit.dev.quarantine_gtfs_rt_service_alert_files
-ORDER BY quarantined_at DESC;
+After the backlog test passes, change the job resource to:
+
+```yaml
+pause_status: UNPAUSED
 ```
 
-Expected result for the newly uploaded physical file:
+Deploy the development target and observe both schedules for at least 24 hours:
 
-- Bronze count increases by exactly one.
-- The latest Bronze `source_file_path` matches the SHA-addressed file uploaded
-  by GitHub Actions.
-- Quarantine count does not increase.
-- Silver contains the decoded alert entities when the source snapshot contains
-  alerts.
+```bash
+databricks bundle deploy --target transit_dev
+```
 
-## Follow-up tests after the happy path
+The intended nominal cadence is:
 
-Run these separately so each failure mode remains easy to explain:
+```text
+GitHub poller:       minute 07, 22, 37, 52
+Databricks consumer: minute 00, 15, 30, 45
+```
 
-1. Re-run the poller when the source bytes are unchanged and confirm
-   `ALREADY_EXISTS` plus no new Bronze row.
-2. Upload a deliberately invalid `.pb` under a new immutable path and confirm
-   one Bronze row plus one quarantine row.
-3. Restore a valid changed payload and confirm the pipeline continues from its
-   checkpoint without a full refresh.
+Missing one nominal hand-off window is acceptable: a later Auto Loader update
+must discover the file. Direct orchestration from one repository into the other
+is intentionally avoided.
 
+## Scheduled-run acceptance and next hardening work
+
+During the first 24-hour observation window, collect:
+
+- one attempt manifest for each poller run;
+- `UPLOADED`, `ALREADY_EXISTS`, and failure counts;
+- Volume new-file count versus Bronze new-file count;
+- duplicate Bronze `source_file_path` count, which must remain zero;
+- quarantine and Protobuf decode-failure counts;
+- GitHub OIDC identity evidence showing the service principal;
+- Databricks job failures, duration, and overlapping-run evidence.
+
+After scheduling is stable, the next engineering priorities are:
+
+1. Persist attempt manifests to a durable Volume path and Delta audit table
+   instead of relying on seven-day GitHub artifacts.
+2. Reconcile successful `UPLOADED` manifests, Volume inventory, and Bronze
+   ingestion within a defined latency objective.
+3. Add poller, consumer, and reconciliation failure alerts.
+4. Detect zero-byte and otherwise undiscovered landing files through inventory.
+5. Preserve GTFS-RT feed incrementality and deletion tombstones, then build a
+   `feed_entity_id`-based current Service Alerts model.
