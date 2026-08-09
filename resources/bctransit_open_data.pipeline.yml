@@ -19,3 +19,5 @@ resources:
             path: ../src/pipelines/bronze/rt_service_alerts.py
         - file:
             path: ../src/pipelines/silver/rt_service_alerts.py
+        - file:
+            path: ../src/pipelines/gold/rt_service_alerts.py
