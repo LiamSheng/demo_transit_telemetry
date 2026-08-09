@@ -189,6 +189,93 @@ def silver_gtfs_rt_service_alerts():
     )
 
 
+@dp.materialized_view(
+    name="silver_gtfs_rt_service_alert_versions",
+    comment=(
+        "Deduplicated GTFS-RT service-alert payload versions. "
+        "Grain: one row per feed_entity_id and alert_payload_sha256."
+    ),
+    table_properties={"quality": "silver"},
+)
+def silver_gtfs_rt_service_alert_versions():
+    """
+    把多次 Feed 观测中相同的 Alert payload 收敛为一个业务版本。
+
+    使用 Materialized View 在完整 observation 历史上聚合，避免在无 watermark 的
+    streaming deduplication 中无限保留状态。
+    """
+
+    observations = spark.read.table("silver_gtfs_rt_service_alerts")  # noqa: F821
+
+    observation_order = F.struct(
+        F.coalesce(F.col("feed_timestamp_utc"), F.col("bronze_ingested_at")).alias(
+            "effective_observation_time"
+        ),
+        F.col("bronze_ingested_at").alias("bronze_ingested_at"),
+        F.col("raw_content_sha256").alias("raw_content_sha256"),
+    )
+
+    observation_payload = F.struct(
+        "source_file_path",
+        "raw_content_sha256",
+        "timestamp_excluded_snapshot_sha256",
+        "gtfs_realtime_version",
+        "feed_incrementality",
+        "feed_timestamp_unix",
+        "feed_timestamp_utc",
+        "bronze_ingested_at",
+        "entity_index",
+        "is_deleted",
+        "cause",
+        "effect",
+        "header_text",
+        "description_text",
+        "active_period",
+        "informed_entity",
+    )
+
+    versions = observations.groupBy(
+        "feed_entity_id",
+        "alert_payload_sha256",
+    ).agg(
+        F.count("*").cast("long").alias("observation_count"),
+        F.min("feed_timestamp_utc").alias("first_feed_timestamp_utc"),
+        F.max("feed_timestamp_utc").alias("last_feed_timestamp_utc"),
+        F.min("bronze_ingested_at").alias("first_ingested_at"),
+        F.max("bronze_ingested_at").alias("last_ingested_at"),
+        F.min_by(observation_payload, observation_order).alias("first_observation"),
+        F.max_by(observation_payload, observation_order).alias("latest_observation"),
+    )
+
+    return versions.select(
+        "feed_entity_id",
+        "alert_payload_sha256",
+        "observation_count",
+        "first_feed_timestamp_utc",
+        "last_feed_timestamp_utc",
+        "first_ingested_at",
+        "last_ingested_at",
+        F.col("first_observation.source_file_path").alias("first_source_file_path"),
+        F.col("first_observation.raw_content_sha256").alias("first_raw_content_sha256"),
+        F.col("latest_observation.source_file_path").alias("latest_source_file_path"),
+        F.col("latest_observation.raw_content_sha256").alias("latest_raw_content_sha256"),
+        F.col("latest_observation.timestamp_excluded_snapshot_sha256").alias(
+            "latest_timestamp_excluded_snapshot_sha256"
+        ),
+        F.col("latest_observation.gtfs_realtime_version").alias("gtfs_realtime_version"),
+        F.col("latest_observation.feed_incrementality").alias("latest_feed_incrementality"),
+        F.col("latest_observation.feed_timestamp_unix").alias("latest_feed_timestamp_unix"),
+        F.col("latest_observation.entity_index").alias("latest_entity_index"),
+        F.col("latest_observation.is_deleted").alias("is_deleted"),
+        F.col("latest_observation.cause").alias("cause"),
+        F.col("latest_observation.effect").alias("effect"),
+        F.col("latest_observation.header_text").alias("header_text"),
+        F.col("latest_observation.description_text").alias("description_text"),
+        F.col("latest_observation.active_period").alias("active_period"),
+        F.col("latest_observation.informed_entity").alias("informed_entity"),
+    )
+
+
 @dp.table(
     name="quarantine_gtfs_rt_service_alert_files",
     comment="GTFS-RT files that failed decode or structural validation",
