@@ -1,5 +1,5 @@
 [project]
-name = "demo_transit_telemetry"
+name = "bc-transit-data-platform"
 version = "0.0.1"
 authors = [{ name = "linzi9506@gmail.com" }]
 requires-python = ">=3.12,<3.13"

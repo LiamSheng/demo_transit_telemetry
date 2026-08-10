@@ -5,4 +5,4 @@ resources:
       schema_name: ${var.schema}
       name: transit_landing
       volume_type: MANAGED
-      comment: Landing volume for raw transit telemetry source files.
+      comment: Shared landing volume for raw BC Transit source files.
