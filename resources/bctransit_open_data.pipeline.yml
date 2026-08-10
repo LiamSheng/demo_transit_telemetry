@@ -12,6 +12,7 @@ resources:
       configuration:
         transit.sources.rt_service_alerts.path: /Volumes/${var.catalog}/${var.schema}/transit_landing/raw/rt_service_alerts
         transit.gtfs_rt.descriptor_path: /Volumes/${var.catalog}/${var.schema}/transit_landing/schema/gtfs-realtime.desc
+        transit.gtfs_rt.feed_stale_after_minutes: "90"
         spark.sql.session.timeZone: UTC
 
       libraries:
@@ -19,3 +20,5 @@ resources:
             path: ../src/pipelines/bronze/rt_service_alerts.py
         - file:
             path: ../src/pipelines/silver/rt_service_alerts.py
+        - file:
+            path: ../src/pipelines/gold/rt_service_alerts.py

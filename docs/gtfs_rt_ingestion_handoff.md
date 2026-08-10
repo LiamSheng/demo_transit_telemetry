@@ -27,9 +27,9 @@ Responsibilities:
 
 The poller does not decode Protobuf and does not run the Lakeflow pipeline.
 
-### Databricks consumer repository
+### Databricks platform repository
 
-Repository: `LiamSheng/demo_transit_telemetry`
+Repository: `LiamSheng/bc-transit-data-platform`
 
 Responsibilities:
 
@@ -41,7 +41,9 @@ Responsibilities:
 - Route structurally valid Service Alerts to Silver and invalid files to a
   quarantine table.
 
-The Databricks repository does not call the BC Transit HTTP endpoint.
+The platform repository does not call the BC Transit HTTP endpoint. It is the
+unified Databricks control plane for this and other transit data products; the
+GTFS-RT poller remains an independently deployed source adapter.
 
 ## Cross-repository contract
 

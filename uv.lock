@@ -189,7 +189,7 @@ wheels = [
 ]
 
 [[package]]
-name = "demo-transit-telemetry"
+name = "bc-transit-data-platform"
 version = "0.0.1"
 source = { virtual = "." }
 

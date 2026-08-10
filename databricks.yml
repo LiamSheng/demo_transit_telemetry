@@ -1,5 +1,9 @@
-# This is a Databricks asset bundle definition for demo_transit_telemetry.
-# See https://docs.databricks.com/dev-tools/bundles/index.html for documentation.
+# Databricks deployment identity for the BC Transit Data Platform.
+#
+# Keep the legacy bundle name and UUID until a deliberate state migration is
+# planned. Existing bundle state and workspace paths use this identity; changing
+# it only to match the repository name could create parallel deployments.
+# See docs/platform_boundary.md for the repository/resource naming policy.
 bundle:
   name: demo_transit_telemetry
   uuid: c134c70d-a596-484d-a1a1-a327cb05fef9
